@@ -9,6 +9,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18cd7635fea7bb481ea543b392789844c1ad581299da70184c7175ce3af76603"
 
 [[package]]
+name = "embed-manifest"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40ff574b0b0a794f8995383bb83f21f8f99214422cae791cb48d66da524b00f7"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -42,6 +48,7 @@ name = "trustoline"
 version = "0.1.0"
 dependencies = [
  "compiler_builtins",
+ "embed-manifest",
  "ufmt",
  "ufmt-write",
  "windows-sys",
