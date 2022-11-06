@@ -5,14 +5,16 @@
 
 use core::mem::{size_of, MaybeUninit};
 use core::{
-    ffi::c_void,
+    ffi::{c_void, CStr},
     ptr::{addr_of, addr_of_mut, null, null_mut},
 };
 extern crate alloc;
 use alloc::alloc::{GlobalAlloc, Layout};
+use alloc::ffi::CString;
 use alloc::vec::Vec;
 use ufmt_write::uWrite;
-use windows_sys::w;
+use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+use windows_sys::Win32::System::Environment::SetCurrentDirectoryA;
 use windows_sys::Win32::{
     Foundation::*,
     Storage::FileSystem::WriteFile,
@@ -22,13 +24,16 @@ use windows_sys::Win32::{
             FormatMessageA, FORMAT_MESSAGE_ALLOCATE_BUFFER, FORMAT_MESSAGE_FROM_SYSTEM,
             FORMAT_MESSAGE_IGNORE_INSERTS,
         },
-        Environment::{GetCommandLineW, GetEnvironmentVariableW},
+        Environment::{GetCommandLineA, GetEnvironmentVariableA},
         JobObjects::*,
         Memory::{GetProcessHeap, HeapAlloc, HeapFree, HeapReAlloc, HEAP_ZERO_MEMORY},
-        Threading::{ExitProcess, GetStartupInfoW, STARTUPINFOW},
+        Threading::*,
+        WindowsProgramming::INFINITE,
     },
 };
 
+// Windows wants this symbol. It has something to do with floating point usage?
+// idk, defining it gets rid of link errors.
 #[no_mangle]
 #[used]
 static _fltused: i32 = 0;
@@ -53,15 +58,6 @@ unsafe impl GlobalAlloc for SystemAlloc {
         HeapReAlloc(GetProcessHeap(), 0, ptr as *const c_void, new_size) as *mut u8
     }
 }
-
-// In dev builds, the linker expects this symbol to exist. The value doesn't matter, because
-// it's never actually *used* when panic="abort". And in release builds, the optimizer is
-// clever enough to realize this, and remove all references to it. But in dev builds, having
-// it defined as *something* lets the link finish.
-// #[no_mangle]
-// unsafe fn __CxxFrameHandler3(_rec: c_void, _node: c_void, _context: c_void, _pdc: c_void) -> i32 {
-//     0
-// }
 
 struct StdErr;
 impl StdErr {
@@ -96,7 +92,7 @@ impl uWrite for StdErr {
     }
 }
 
-macro_rules! whine {
+macro_rules! eprintln {
     ($($tt:tt)*) => {{
         _ = ufmt::uwriteln!(StdErr, $($tt)*);
     }}
@@ -105,7 +101,7 @@ macro_rules! whine {
 #[panic_handler]
 pub extern "C" fn panic(info: &core::panic::PanicInfo) -> ! {
     if let Some(location) = info.location() {
-        whine!(
+        eprintln!(
             "panic at {}:{} column {}",
             location.file(),
             location.line(),
@@ -114,7 +110,7 @@ pub extern "C" fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     if let Some(msg) = info.message() {
         if let Some(msg_str) = msg.as_str() {
-            whine!("message: {}", msg_str);
+            eprintln!("message: {}", msg_str);
         }
     }
     unsafe {
@@ -124,74 +120,54 @@ pub extern "C" fn panic(info: &core::panic::PanicInfo) -> ! {
 
 macro_rules! check {
     ($e:expr) => {
-        if $e != 0 {
-            whine!(
-        }
-    }
-}
-
-fn check(ok: i32) {
-    if ok == 0 {
-        unsafe {
+        if $e == 0 {
             let err = GetLastError();
-            let mut msg_ptr: *mut u16 = null_mut();
-            let size = FormatMessageW(
+            let mut msg_ptr: *mut u8 = null_mut();
+            let size = FormatMessageA(
                 FORMAT_MESSAGE_ALLOCATE_BUFFER
                     | FORMAT_MESSAGE_FROM_SYSTEM
                     | FORMAT_MESSAGE_IGNORE_INSERTS,
                 null(),
                 err,
                 0,
-                // Super weird calling convention: this argument is typed as *mut u16,
+                // Weird calling convention: this argument is typed as *mut u16,
                 // but if you pass FORMAT_MESSAGE_ALLOCATE_BUFFER then you have to
                 // *actually* pass in a *mut *mut u16 and just lie about the type.
+                // Getting Rust to do this requires some convincing.
                 addr_of_mut!(msg_ptr) as *mut _ as _,
                 0,
                 null(),
             );
             let msg = core::slice::from_raw_parts(msg_ptr, size as usize);
-            _ = StdErr.write_bytes(msg);
-            _ = StdErr.write_bytes(b"\n");
-            panic!();
+            let msg = core::str::from_utf8_unchecked(msg);
+            eprintln!("Error: {} (from {})", msg, stringify!($e));
+            ExitProcess(1);
         }
     }
 }
 
-unsafe fn wstr_to_slice(start: *const u16) -> &'static [u16] {
-    let mut len = 0usize;
-    let mut ptr = start;
-    while *ptr != 0 {
-        len += 1;
-        ptr = ptr.offset(1);
-    }
-    core::slice::from_raw_parts(start, len)
+macro_rules! c {
+    ($s:literal) => {
+        CStr::from_bytes_with_nul_unchecked(concat!($s, "\0").as_bytes())
+    };
 }
 
-unsafe fn dump_wstr(wstr: &[u16]) {
-    for char in wstr.iter() {
-        if *char == 0 {
-            break;
-        }
-        _ = StdErr.write_bytes(&[*char as u8]);
-    }
-    _ = StdErr.write_bytes(b"\n");
-}
-
-fn getenv(name: *const u16) -> Option<Vec<u16>> {
+fn getenv(name: &CStr) -> Option<CString> {
     unsafe {
-        let count = GetEnvironmentVariableW(name, null_mut(), 0);
+        let count = GetEnvironmentVariableA(name.as_ptr() as _, null_mut(), 0);
         if count == 0 {
             return None;
         }
-        let mut value = Vec::<u16>::with_capacity(count as usize);
-        GetEnvironmentVariableW(name, value.as_mut_ptr(), value.capacity() as u32);
-        value.set_len((count - 1) as usize);
-        return Some(value);
+        let mut value = Vec::<u8>::with_capacity(count as usize);
+        GetEnvironmentVariableA(
+            name.as_ptr() as _,
+            value.as_mut_ptr(),
+            value.capacity() as u32,
+        );
+        value.set_len(count as usize);
+        return Some(CString::from_vec_with_nul_unchecked(value));
     }
 }
-
-const DQUOTE: u16 = '"' as u16;
-const SPACE: u16 = ' ' as u16;
 
 pub trait SizeOf {
     fn size_of(&self) -> u32;
@@ -203,14 +179,11 @@ impl<T: Sized> SizeOf for T {
     }
 }
 
-// for subsystem = "windows", need to either rename this to WinMainCRTStartup, or
-// somehow set /ENTRYPOINT in linker
+// build.rs passes a custom linker flag to make this the entrypoint to the executable
 #[no_mangle]
-pub extern "C" fn mainCRTStartup() -> ! {
+pub extern "C" fn entry() -> ! {
     unsafe {
-        let cmdline = wstr_to_slice(GetCommandLineW());
-        whine!("chars in cmdline: {}", cmdline.len());
-        dump_wstr(&cmdline);
+        let cmdline = CStr::from_ptr(GetCommandLineA() as _);
 
         // ...don't actually need filename really, I guess!
         // if put script in a zip file with a single element named __main__.py, and
@@ -222,59 +195,99 @@ pub extern "C" fn mainCRTStartup() -> ! {
         // when writing it out)
         // also lets us skip parsing the command line!
 
-        // XX no unwrap
-        let python_exe = getenv(w!["POSY_PYTHON"]).unwrap();
-        dump_wstr(&python_exe.as_slice());
+        let python_exe = getenv(c!("POSY_PYTHON"));
+        if python_exe.is_none() {
+            eprintln!("need POSY_PYTHON to be set");
+            ExitProcess(1);
+        }
+        let python_exe = python_exe.unwrap_unchecked();
 
-        let mut new_cmdline = Vec::<u16>::new();
-        new_cmdline.push(DQUOTE);
-        for char in python_exe {
-            if char == DQUOTE {
-                new_cmdline.extend(&[DQUOTE, DQUOTE, DQUOTE]);
+        let mut new_cmdline = Vec::<u8>::new();
+        new_cmdline.push('"' as u8);
+        for byte in python_exe.as_bytes() {
+            if *byte == '"' as u8 {
+                // 3 double quotes: one to end the quoted span, one to become a literal double-quote,
+                // and one to start a new quoted span.
+                new_cmdline.extend(br#"""""#);
             } else {
-                new_cmdline.push(char);
+                new_cmdline.push(*byte);
             }
         }
-        new_cmdline.push(DQUOTE);
-        new_cmdline.push(SPACE);
-        new_cmdline.extend(cmdline.iter());
-        dump_wstr(new_cmdline.as_slice());
+        new_cmdline.extend(br#"" "#);
+        new_cmdline.extend(cmdline.to_bytes_with_nul());
+        //eprintln!("new_cmdline: {}", core::str::from_utf8_unchecked(new_cmdline.as_slice()));
 
         let job = CreateJobObjectW(null(), null());
-        let mut job_info = MaybeUninit::<JOBOBJECT_BASIC_LIMIT_INFORMATION>::uninit();
+        let mut job_info = MaybeUninit::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>::uninit();
         let mut retlen = 0u32;
-        let ok = QueryInformationJobObject(
+        check!(QueryInformationJobObject(
             job,
-            JobObjectBasicLimitInformation,
+            JobObjectExtendedLimitInformation,
             job_info.as_mut_ptr() as *mut _,
             job_info.size_of(),
             &mut retlen as *mut _,
-        );
-        if ok == 0 || retlen != job_info.size_of() {
-            panic!("QueryInformationJobObject failed");
-        }
+        ));
         let mut job_info = job_info.assume_init();
-        job_info.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        job_info.LimitFlags |= JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
-        check(SetInformationJobObject(
+        job_info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        job_info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+        check!(SetInformationJobObject(
             job,
-            JobObjectBasicLimitInformation,
+            JobObjectExtendedLimitInformation,
             addr_of!(job_info) as *const _,
             job_info.size_of(),
         ));
-        assert!(ok != 0, "SetInformationJobObject failed");
 
-        let mut si = MaybeUninit::<STARTUPINFOW>::uninit();
-        GetStartupInfoW(si.as_mut_ptr());
+        let mut si = MaybeUninit::<STARTUPINFOA>::uninit();
+        GetStartupInfoA(si.as_mut_ptr());
+        let si = si.assume_init();
+        if si.dwFlags & STARTF_USESTDHANDLES == 0 {
+            // ignore errors from these -- if the handle's not inheritable/not valid, then nothing
+            // we can do
+            SetHandleInformation(si.hStdInput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        }
+        let mut child_process_info = MaybeUninit::<PROCESS_INFORMATION>::uninit();
+        check!(CreateProcessA(
+            python_exe.as_ptr() as *const _,
+            new_cmdline.as_mut_ptr(),
+            null(),
+            null(),
+            1,
+            0,
+            null(),
+            null(),
+            addr_of!(si),
+            child_process_info.as_mut_ptr(),
+        ));
+        let child_process_info = child_process_info.assume_init();
+        check!(AssignProcessToJobObject(job, child_process_info.hProcess));
+        
+        CloseHandle(child_process_info.hThread);
+        if let Some(tmp) = getenv(c!("TEMP")) {
+            SetCurrentDirectoryA(tmp.as_ptr() as *const _);
+        } else {
+            SetCurrentDirectoryA(c!("c:\\").as_ptr() as *const _);
+        }
 
-        // CreateJobObject
-        // make handles inheritable
-        // CreateProcessW
-        // AssignProcessToJobObject
-        // SetConsoleCtrlHandler
-        // clear_app_starting_state
-        // close handles, chdir
+        // We want to ignore control-C/control-Break/logout/etc.; the same event will
+        // be delivered to the child, so we let them decide whether to exit or not.
+        unsafe extern "system" fn control_key_handler(_: u32) -> BOOL {
+            1
+        }
+        SetConsoleCtrlHandler(Some(control_key_handler), 1);
 
-        ExitProcess(3);
+        WaitForSingleObject(child_process_info.hProcess, INFINITE);
+        let mut exit_code = 0u32;
+        check!(GetExitCodeProcess(child_process_info.hProcess, addr_of_mut!(exit_code)));
+        ExitProcess(exit_code);
+
+        // still need to:
+        // - close inherited handles (stdio + lpReserved2)
+
+        // and for GUI support:
+        // - feature flag I guess?
+        // - POSY_PYTHONW instead of POSY_PYTHON
+        // - pump messages after child started
     }
 }
