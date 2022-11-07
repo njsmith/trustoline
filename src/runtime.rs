@@ -38,17 +38,19 @@ unsafe impl GlobalAlloc for SystemAlloc {
 #[panic_handler]
 pub extern "C" fn panic(info: &core::panic::PanicInfo) -> ! {
     if let Some(location) = info.location() {
-        crate::eprintln!(
-            "panic at {}:{} column {}",
+        let mut msg = "(couldn't format message)";
+        if let Some(msg_args) = info.message() {
+            if let Some(msg_str) = msg_args.as_str() {
+                msg = msg_str;
+            }
+        }    
+        eprintln!(
+            "panic at {}:{} (column {}): {}",
             location.file(),
             location.line(),
-            location.column()
+            location.column(),
+            msg,
         );
-    }
-    if let Some(msg) = info.message() {
-        if let Some(msg_str) = msg.as_str() {
-            eprintln!("message: {}", msg_str);
-        }
     }
     unsafe {
         ExitProcess(128);

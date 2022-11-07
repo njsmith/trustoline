@@ -2,6 +2,6 @@
 #![no_std]
 
 mod runtime;
-mod helper;
+mod helpers;
 mod diagnostics;
 pub mod bounce;

@@ -4,19 +4,19 @@ use core::{
     ptr::{addr_of, addr_of_mut, null, null_mut},
 };
 extern crate alloc;
-use crate::helper::SizeOf;
+use crate::helpers::SizeOf;
 use crate::{c, check, eprintln};
 use alloc::{ffi::CString, vec::Vec};
-use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
-use windows_sys::Win32::System::Environment::SetCurrentDirectoryA;
 use windows_sys::Win32::{
     Foundation::*,
     System::{
-        Environment::{GetCommandLineA, GetEnvironmentVariableA},
+        Console::*,
+        Environment::{GetCommandLineA, GetEnvironmentVariableA, SetCurrentDirectoryA},
         JobObjects::*,
         Threading::*,
         WindowsProgramming::INFINITE,
     },
+    UI::WindowsAndMessaging::*,
 };
 
 fn getenv(name: &CStr) -> Option<CString> {
@@ -100,7 +100,7 @@ fn make_job_object() -> HANDLE {
 
 fn spawn_child(si: &STARTUPINFOA, child_cmdline: &mut [u8]) -> HANDLE {
     unsafe {
-        if si.dwFlags & STARTF_USESTDHANDLES == 0 {
+        if si.dwFlags & STARTF_USESTDHANDLES != 0 {
             // ignore errors from these -- if the handle's not inheritable/not valid, then nothing
             // we can do
             SetHandleInformation(si.hStdInput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
@@ -128,6 +128,73 @@ fn spawn_child(si: &STARTUPINFOA, child_cmdline: &mut [u8]) -> HANDLE {
     }
 }
 
+// Apparently, the Windows C runtime has a secret way to pass file descriptors into child
+// processes, by using the .lpReserved2 field. We want to close those file descriptors too.
+// The UCRT source code has details on the memory layout (see also initialize_inherited_file_handles_nolock):
+//   https://github.com/huangqinjin/ucrt/blob/10.0.19041.0/lowio/ioinit.cpp#L190-L223
+fn close_handles(si: &STARTUPINFOA) {
+    unsafe {
+        for handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE] {
+            CloseHandle(GetStdHandle(handle));
+            SetStdHandle(handle, INVALID_HANDLE_VALUE);
+        }
+
+        if si.cbReserved2 == 0 || si.lpReserved2 == null_mut() {
+            return;
+        }
+        let crt_magic = si.lpReserved2 as *const u32;
+        let handle_count = crt_magic.read_unaligned() as isize;
+        let handle_start = crt_magic.offset(1 + handle_count as isize);
+        for i in 0..handle_count {
+            CloseHandle(handle_start.offset(i).read_unaligned() as HANDLE);
+        }
+    }
+}
+
+/* 
+    I don't really understand what this function does. It's a straight port from 
+    https://github.com/pypa/distlib/blob/master/PC/launcher.c, which has the following
+    comment:
+ 
+        End the launcher's "app starting" cursor state.
+        When Explorer launches a Windows (GUI) application, it displays
+        the "app starting" (the "pointer + hourglass") cursor for a number
+        of seconds, or until the app does something UI-ish (eg, creating a
+        window, or fetching a message).  As this launcher doesn't do this
+        directly, that cursor remains even after the child process does these
+        things.  We avoid that by doing the stuff in here.
+        See http://bugs.python.org/issue17290 and
+        https://github.com/pypa/pip/issues/10444#issuecomment-973408601  
+       
+    Why do we call `PostMessage`/`GetMessage` at the start, before waiting for the
+    child? (Looking at the bpo issue above, this was originally the *whole* fix.)
+    Is creating a window and calling PeekMessage the best way to do this? idk.
+*/
+fn clear_app_starting_state(child_handle: HANDLE) {
+    unsafe {
+        PostMessageA(0, 0, 0, 0);
+        let mut msg = MaybeUninit::<MSG>::uninit();
+        GetMessageA(msg.as_mut_ptr(), 0, 0, 0);
+        WaitForInputIdle(child_handle, INFINITE);
+        let hwnd = CreateWindowExA(
+            0,
+            c!("STATIC").as_ptr() as *const _,
+            c!("Posy Python Trampoline").as_ptr() as *const _,
+            0,
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE,
+            0,
+            0,
+            null(),
+        );
+        PeekMessageA(msg.as_mut_ptr(), hwnd, 0, 0, 0);
+        DestroyWindow(hwnd);
+    }
+}
+
 pub fn bounce(is_gui: bool) -> ! {
     unsafe {
         let mut child_cmdline = make_child_cmdline(is_gui);
@@ -139,6 +206,9 @@ pub fn bounce(is_gui: bool) -> ! {
 
         let child_handle = spawn_child(&si, child_cmdline.as_mut_slice());
         check!(AssignProcessToJobObject(job, child_handle));
+
+        // (best effort) Close all the handles that we can
+        close_handles(&si);
 
         // (best effort) Switch to some innocuous directory so we don't hold the original
         // cwd open.
@@ -155,15 +225,13 @@ pub fn bounce(is_gui: bool) -> ! {
         }
         SetConsoleCtrlHandler(Some(control_key_handler), 1);
 
+        if is_gui {
+            clear_app_starting_state(child_handle);
+        }
+
         WaitForSingleObject(child_handle, INFINITE);
         let mut exit_code = 0u32;
         check!(GetExitCodeProcess(child_handle, addr_of_mut!(exit_code)));
         ExitProcess(exit_code);
-
-        // still need to:
-        // - close inherited handles (stdio + lpReserved2)
-
-        // and for GUI support:
-        // - pump messages after child started
     }
 }

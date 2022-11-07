@@ -4,16 +4,28 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-    {
-        "type": "lldb",
-        "request": "launch",
-        "name": "Cargo launch",
-        "cargo": {
-            "args": [
-                "build",
-            ]
-        },
-        "args": []
-    }
+
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'posy-trampoline-gui'",
+            "cargo": {
+                "args": [
+                    "+nightly",
+                    "build",
+                    "-Zbuild-std=core,panic_abort,alloc",
+                    "-Zbuild-std-features=compiler-builtins-mem",
+                    "--target=x86_64-pc-windows-msvc",
+                    "--bin=posy-trampoline-gui",
+                    "--package=trustoline"
+                ],
+                "filter": {
+                    "name": "posy-trampoline-gui",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }        
     ]
 }

@@ -10,6 +10,7 @@ fn main() {
             new_manifest("Posy.Trampoline").remove_dependency("Microsoft.Windows.Common-Controls");
         embed_manifest(manifest).expect("unable to embed manifest");
         println!("cargo:rustc-link-arg=/ENTRY:entry");
+        println!("cargo:rustc-link-arg=/LTCG");
         println!("cargo:rerun-if-changed=build.rs");
     }
 }
