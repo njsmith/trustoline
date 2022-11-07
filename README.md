@@ -108,3 +108,5 @@ Two approaches that are reasonably likely to work:
 I know that the latter worked with "rustc 1.67.0-nightly (09508489e
 2022-11-04)". And hopefully in the future as `#![no_std]` develops, this will
 get smoother.
+
+Also, sometimes it helps to fiddle with optimization levels.

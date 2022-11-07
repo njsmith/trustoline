@@ -9,6 +9,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40ff574b0b0a794f8995383bb83f21f8f99214422cae791cb48d66da524b00f7"
 
 [[package]]
+name = "posy-trampoline"
+version = "0.1.0"
+dependencies = [
+ "embed-manifest",
+ "ufmt",
+ "ufmt-write",
+ "windows-sys",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -35,16 +45,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "trustoline"
-version = "0.1.0"
-dependencies = [
- "embed-manifest",
- "ufmt",
- "ufmt-write",
- "windows-sys",
 ]
 
 [[package]]

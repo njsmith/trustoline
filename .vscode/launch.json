@@ -17,7 +17,7 @@
                     "-Zbuild-std-features=compiler-builtins-mem",
                     "--target=x86_64-pc-windows-msvc",
                     "--bin=posy-trampoline-gui",
-                    "--package=trustoline"
+                    "--package=posy-trampoline"
                 ],
                 "filter": {
                     "name": "posy-trampoline-gui",
